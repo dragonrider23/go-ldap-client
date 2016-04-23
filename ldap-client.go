@@ -21,6 +21,7 @@ type LDAPClient struct {
 	UserFilter   string // e.g. "(uid=%s)"
 	Base         string
 	Attributes   []string
+	ADDomainName string // ActiveDirectory domain name "example.com"
 }
 
 // Connect connects to the ldap backend
@@ -56,19 +57,36 @@ func (lc *LDAPClient) Connect() error {
 func (lc *LDAPClient) Close() {
 	if lc.Conn != nil {
 		lc.Conn.Close()
+		lc.Conn = nil
 	}
 }
 
 // Authenticate authenticates the user against the ldap backend
 func (lc *LDAPClient) Authenticate(username, password string) (bool, map[string]string, error) {
-	err := lc.Connect()
+	var err error
+	err = lc.Connect()
 	if err != nil {
 		return false, nil, err
 	}
 
+	// For simple authentication with Active Directory, the full userDN isn't needed
+	// A user can login with {username}@{AD domain}
+	// AD authentication will not return user attributes
+	if lc.ADDomainName != "" {
+		err = lc.Conn.Bind(username+"@"+lc.ADDomainName, password)
+		if err != nil {
+			if ldap.IsErrorWithCode(err, ldap.LDAPResultInvalidCredentials) {
+				return false, nil, nil
+			}
+			return false, nil, err
+		}
+		return true, nil, nil
+	}
+
+	// Regular LDAP authentication
 	// First bind with a read only user
 	if lc.BindDN != "" && lc.BindPassword != "" {
-		err := lc.Conn.Bind(lc.BindDN, lc.BindPassword)
+		err = lc.Conn.Bind(lc.BindDN, lc.BindPassword)
 		if err != nil {
 			return false, nil, err
 		}
@@ -106,7 +124,10 @@ func (lc *LDAPClient) Authenticate(username, password string) (bool, map[string]
 	// Bind as the user to verify their password
 	err = lc.Conn.Bind(userDN, password)
 	if err != nil {
-		return false, user, err
+		if ldap.IsErrorWithCode(err, ldap.LDAPResultInvalidCredentials) {
+			return false, nil, nil
+		}
+		return false, nil, err
 	}
 
 	// Rebind as the read only user for any further queries
